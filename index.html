@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>下单价格核算器</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:"微软雅黑",sans-serif;background:#f5f7fa;padding:10px;}
+.container{width:100%;max-width:100%;background:#fff;border-radius:10px;padding:15px;box-shadow:0 2px 8px #eee;}
+h2{text-align:center;color:#333;margin-bottom:15px;font-size:18px;}
+.box{margin:10px 0;}
+label{display:block;margin-bottom:4px;font-weight:500;color:#444;font-size:14px;}
+input,textarea{width:100%;padding:9px 10px;border:1px solid #ddd;border-radius:6px;font-size:14px;outline:none;background:#fafafa;}
+input:focus,textarea:focus{border-color:#2d8cf0;background:#fff;}
+button{width:100%;background:#2d8cf0;color:#fff;border:none;padding:10px;border-radius:6px;font-size:15px;cursor:pointer;margin-top:5px;}
+button:active{background:#1b76d8;}
+.result{margin-top:15px;padding:12px;border:1px solid #eee;border-radius:8px;line-height:1.7;font-size:14px;white-space:pre-wrap;word-break:break-all;overflow-wrap:break-word;background:#fefefe;}
+#searchResult{max-height:300px;overflow-y:auto;}
+.flex-row{display:flex;gap:8px;align-items:flex-end;}
+.flex-row .box{flex:1;margin:0;}
+.tip{color:#999;font-size:12px;margin-top:3px;}
+.copy-btn{width:100%;background:#27ae60;margin-top:10px;}
+.price-tab{display:flex;gap:8px;margin:10px 0;}
+.price-tab button{flex:1;margin:0;background:#eee;color:#333;}
+.price-tab button.active{background:#2d8cf0;color:#fff;}
+.edit-price{color:#2d8cf0;cursor:pointer;border-bottom:1px dashed #2d8cf0;margin-left:5px;}
+.edit-price:hover{color:#1b76d8;}
+.edit-price.disabled{color:#999;cursor:not-allowed;border-bottom:none;}
+.stock-btn{color:#e74c3c;cursor:pointer;font-size:12px;margin-left:8px;padding:2px 6px;border:1px solid #e74c3c;border-radius:3px;}
+.stock-btn:hover{background:#e74c3c;color:#fff;}
+.price-input{width:60px;padding:2px 5px;font-size:14px;border:1px solid #2d8cf0;border-radius:4px;text-align:center;}
+.sync-status{font-size:12px;color:#999;text-align:center;margin-bottom:10px;}
+.sync-status.synced{color:#27ae60;}
+.sync-status.syncing{color:#f39c12;}
+.admin-btn{background:#e74c3c;margin-top:5px;}
+.admin-btn:hover{background:#c0392b;}
+</style>
+</head>
+<body>
+<div class="container">
+    <h2>下单价格核算器</h2>
+    <div class="sync-status" id="syncStatus">正在连接云端...</div>
+    <div class="price-tab">
+        <button id="tab1" class="active" onclick="switchPrice(1)">价格表1</button>
+        <button id="tab2" onclick="switchPrice(2)">价格表2</button>
+    </div>
+    <div class="box">
+        <label>输入商品序号（支持 6、6x2、6*2，空格/逗号分隔）</label>
+        <input type="text" id="numInput" placeholder="示例：1 6x2 21*3">
+        <div class="tip">支持空格、中英文逗号、混合分隔</div>
+    </div>
+    <div class="box">
+        <label>搜索商品（输入部分名称）</label>
+        <div class="flex-row">
+            <input type="text" id="searchInput" placeholder="输入商品名称关键字">
+            <button onclick="searchGoods()" style="width:80px;margin-top:0;background:#27ae60;">搜索</button>
+        </div>
+    </div>
+    <div class="result" id="searchResult" style="display:none;"></div>
+    <div class="flex-row">
+        <div class="box">
+            <label>单件统一优惠</label>
+            <input type="number" id="discountInput" value="0" min="0" step="0.1">
+        </div>
+        <div class="box">
+            <button onclick="getPrice()">一键核算</button>
+        </div>
+    </div>
+    <div class="box">
+        <label>对应商品清单</label>
+        <textarea id="goodsNameText" readonly rows="6" placeholder="商品+购买份数自动展示"></textarea>
+    </div>
+    <div class="result" id="showResult"></div>
+    <button class="copy-btn" onclick="copyOrder()" id="copyBtn">一键复制整单信息</button>
+    <div id="adminSection" style="display:none;margin-top:10px;">
+        <button id="adminBtn" class="admin-btn" onclick="checkAdminPassword()">管理员登录</button>
+    </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
+<script>
+// ====================== Firebase 配置 ======================
+const firebaseConfig = {
+    apiKey: "AIzaSyAR0BZGTTTKHaNOZKvcMjQYnVPME9R4dq8",
+    authDomain: "jisuanqi-1c6b6.firebaseapp.com",
+    projectId: "jisuanqi-1c6b6",
+    storageBucket: "jisuanqi-1c6b6.firebasestorage.app",
+    messagingSenderId: "520836114423",
+    appId: "1:520836114423:web:e3427819469728970470f2",
+    measurementId: "G-M5YFGLT46S"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+let isAdmin = false;
+let adminRevealed = false;
+let tapCount = 0;
+let tapTimer = null;
+
+// DOM加载完成后绑定事件
+document.addEventListener("DOMContentLoaded", function(){
+    // 移动端三击/三触显示管理员入口
+    document.getElementById("copyBtn").addEventListener("click", function(e){
+        tapCount++;
+        if(tapTimer) clearTimeout(tapTimer);
+        tapTimer = setTimeout(function(){
+            tapCount = 0;
+        }, 500);
+        if(tapCount >= 3){
+            revealAdmin();
+            tapCount = 0;
+        }
+    });
+});
+
+// 电脑端 Ctrl+Shift+A 显示管理员入口
+document.addEventListener("keydown", function(e){
+    if(e.ctrlKey && e.shiftKey && (e.key === "A" || e.key === "a")){
+        e.preventDefault();
+        revealAdmin();
+    }
+});
+
+function revealAdmin(){
+    let section = document.getElementById("adminSection");
+    if(!adminRevealed){
+        section.style.display = "block";
+        adminRevealed = true;
+        alert("管理员入口已显示");
+    } else {
+        section.style.display = "none";
+        adminRevealed = false;
+    }
+}
+
+async function checkAdminPassword(){
+    let password = prompt("请输入管理员密码：");
+    if(!password) return;
+    
+    try {
+        let doc = await db.collection("admin").doc("config").get();
+        if(doc.exists && doc.data().password === password){
+            isAdmin = true;
+            let adminBtn = document.getElementById("adminBtn");
+            adminBtn.innerText = "已登录管理员";
+            adminBtn.style.background = "#27ae60";
+            adminBtn.onclick = function(){
+                if(confirm("确定要退出管理员登录吗？")){
+                    isAdmin = false;
+                    adminBtn.innerText = "管理员登录";
+                    adminBtn.style.background = "#e74c3c";
+                    adminBtn.onclick = checkAdminPassword;
+                }
+            };
+            alert("登录成功！");
+        } else {
+            alert("密码错误！");
+        }
+    } catch(e) {
+        alert("验证失败，请检查网络");
+    }
+}
+
+// ====================== 价格表1（原样不动） ======================
+const goodsData1 = {
+"01":{name:"细支爱喜原味双爆",price:17},
+"02":{name:"细支爱喜橙子双爆",price:16},
+"03":{name:"细支爱喜红酒双爆",price:16},
+"04":{name:"细支爱喜苹果双爆",price:16},
+"05":{name:"细支爱喜芒果双爆",price:16},
+"06":{name:"细支爱喜青柠双爆",price:16},
+"07":{name:"细支爱喜英文爆",price:15},
+"08":{name:"细支爱喜香芋柠檬爆",price:18},
+"09":{name:"细支爱喜冰激凌爆",price:17},
+"10":{name:"细支爱喜1毫克爆",price:16},
+"11":{name:"细支爱喜朱古力爆",price:17},
+"12":{name:"细支爱喜棒棒糖爆",price:17},
+"13":{name:"细支爱喜可乐爆",price:18},
+"14":{name:"细支爱喜咖啡爆",price:17},
+"15":{name:"细支爱喜草莓爆",price:16},
+"16":{name:"细支爱喜冰桃爆",price:17},
+"17":{name:"细支爱喜冰菠萝爆",price:17},
+"18":{name:"细支爱喜五代绿爱",price:15},
+"19":{name:"细支爱喜四代蓝爱",price:15},
+"20":{name:"粗支蓝星芭乐爆",price:18},
+"21":{name:"粗支蓝星可乐柠檬爆",price:17},
+"22":{name:"粗支蓝星西柚双爆",price:18},
+"23":{name:"粗支蓝星冰激凌爆",price:16},
+"24":{name:"粗支蓝星蓝莓双爆",price:17},
+"25":{name:"粗支百乐草莓双爆",price:18},
+"26":{name:"粗支百乐酸奶爆",price:17},
+"27":{name:"粗支百乐红酒爆",price:17},
+"28":{name:"粗支百乐蓝莓爆",price:17},
+"29":{name:"粗支百乐西瓜爆",price:17},
+"30":{name:"粗支百乐菠萝爆",price:17},
+"31":{name:"粗支百乐哈密瓜爆",price:17},
+"32":{name:"粗支百乐莫吉托爆",price:17},
+"34":{name:"细支厉风芭乐爆",price:17},
+"35":{name:"细支厉风酸奶爆",price:17},
+"36":{name:"细支厉风雪梨爆",price:17},
+"37":{name:"粗支铁塔猫日月双爆",price:20},
+"38":{name:"粗支铁塔猫红酒爆",price:18},
+"39":{name:"粗支铁塔猫酸奶爆",price:18},
+"40":{name:"粗支铁塔猫水蜜桃爆",price:16},
+"41":{name:"粗支铁塔猫青苹果爆",price:16},
+"42":{name:"粗支铁塔猫橙子咖啡爆",price:16},
+"43":{name:"粗支铁塔猫奶油咖啡",price:16},
+"44":{name:"细支铁塔猫糖果双爆",price:17},
+"45":{name:"细支铁塔猫烟花葡萄爆",price:17},
+"47":{name:"粗支翻盖人猿香蕉爆",price:17},
+"48":{name:"粗支象之谜五味爆",price:17},
+"49":{name:"粗支女神酸奶爆",price:16},
+"50":{name:"粗支女神荔枝爆",price:17},
+"51":{name:"粗支女神百香果爆",price:17},
+"52":{name:"粗支黑杰克菠萝爆",price:14},
+"53":{name:"粗支黑杰克青柠爆",price:14},
+"54":{name:"粗支黑杰克橙子爆",price:14},
+"55":{name:"中支520草莓爆",price:16},
+"56":{name:"中支520哈密瓜爆",price:16},
+"57":{name:"粗支星空香蕉爆",price:16},
+"58":{name:"粗支星空西瓜爆",price:16},
+"59":{name:"粗支星空菠萝爆",price:16},
+"60":{name:"粗支星空五味爆",price:16},
+"61":{name:"粗支朋友青柠双爆",price:14},
+"62":{name:"粗支朋友水果双爆",price:14},
+"63":{name:"粗支黑魔鬼两千",price:17},
+"64":{name:"日版粗支黑魔鬼灰",price:20},
+"65":{name:"日版粗支黑魔鬼绿",price:21},
+"66":{name:"日版粗支黑魔鬼粉",price:22},
+"67":{name:"细支黑魔鬼两千",price:13},
+"68":{name:"粗支老船长黄",price:14},
+"69":{name:"细支新树叶爆",price:14},
+"70":{name:"细支猫头鹰原味",price:12},
+"71":{name:"细支法佬咖啡",price:11},
+"72":{name:"细支BOSS哈密瓜爆",price:10},
+"73":{name:"细支米兰酸奶双爆",price:13},
+"74":{name:"细支米兰葡萄双爆",price:13},
+"75":{name:"细支米兰复古咖啡",price:14},
+"76":{name:"细支米兰复古香草",price:14},
+"77":{name:"细支米兰复古樱桃",price:14},
+"78":{name:"细支米兰雪茄咖啡",price:14},
+"79":{name:"细支米兰雪茄红酒",price:14},
+"80":{name:"细支米兰雪茄蓝莓",price:14},
+"81":{name:"细支米兰黑",price:11},
+"82":{name:"细支米兰白",price:11},
+"83":{name:"细支米兰绿",price:11},
+"85":{name:"细支关税黄鹤楼口红西瓜爆",price:15},
+"86":{name:"细支关税黄鹤楼口红蓝莓",price:15},
+"87":{name:"细支关税黄鹤楼口红葡萄",price:15},
+"88":{name:"细支关税黄鹤楼口红水蜜桃",price:15},
+"89":{name:"细支关税黄鹤楼口红秋颂爆",price:14},
+"90":{name:"细支关税黄鹤楼口红芭乐爆",price:15},
+"91":{name:"细支关税黄鹤楼口红黑8度",price:16},
+"92":{name:"细支关税黄鹤楼口红1916远见爆",price:16},
+"93":{name:"细支关税黄鹤楼口红1916楼",price:15},
+"94":{name:"细支关税熊猫口红青猫",price:16},
+"95":{name:"支支关税口红和天下",price:15},
+"96":{name:"细支关税黄金叶口红天叶",price:16},
+"97":{name:"粗支日版七星软黑",price:14},
+"98":{name:"粗支日版七星软白",price:16},
+"99":{name:"细支欧盟版卡比龙白",price:17},
+"100":{name:"细支欧盟版卡比龙黑",price:17},
+"101":{name:"越南欧盟版卡比龙总裁黑",price:29},
+"102":{name:"越南欧盟版卡比龙总裁白",price:30},
+"103":{name:"越南欧盟版卡比龙总裁绿",price:30},
+"104":{name:"粗支欧盟版万宝路西瓜双爆",price:24},
+"105":{name:"粗支欧盟版万宝路黑冰双爆",price:21},
+"106":{name:"越南欧盟版万宝路白万",price:20},
+"107":{name:"越南欧盟版万宝路红万",price:20},
+"108":{name:"粗支欧盟版云斯顿",price:20},
+"109":{name:"粗支公版中华软中",price:18},
+"110":{name:"粗支公版中华硬中",price:18},
+"111":{name:"细支公版中华细金中",price:15},
+"112":{name:"细支公版中华6克中",price:18},
+"113":{name:"中支公版中华双金中",price:18},
+"114":{name:"粗支公版和天下",price:22},
+"115":{name:"粗支公版天叶",price:20},
+"116":{name:"粗支公版软大重九",price:24},
+"117":{name:"中支公版天叶黄金叶",price:19},
+"118":{name:"中支公版方竹典藏猫",price:24},
+"119":{name:"细支公版金休闲利群",price:24},
+"120":{name:"细支公版黄鹤楼1916平安爆",price:24},
+"121":{name:"粗支公版硬荷花",price:18},
+"122":{name:"粗支公版黄鹤楼硬珍",price:18},
+"123":{name:"细支公版利群江南韵",price:16},
+"124":{name:"细支公版雨花石",price:15},
+"125":{name:"细支公版芙蓉王沁爽",price:16},
+"126":{name:"细支公版玉溪西瓜爆",price:15},
+"127":{name:"细支公版和天下",price:24},
+"128":{name:"细支好利时酸奶爆",price:12},
+"129":{name:"细支好利时茶香爆",price:12},
+"130":{name:"粗支嘉年华芭乐爆",price:14},
+"131":{name:"中支大华桂花冰萃双爆",price:18},
+"132":{name:"中支大华茉莉白雪双爆",price:18},
+"133":{name:"中支关税黄鹤楼1916十五年",price:17},
+"134":{name:"中支关税黄鹤楼1916龙鳞爆",price:17},
+"135":{name:"中支关税黄鹤楼漫天游爆",price:17},
+"136":{name:"中支关税和天下",price:17},
+"137":{name:"中支关税大重九",price:15},
+"138":{name:"中支关税九五至尊",price:17},
+"139":{name:"中支关税熊猫青猫",price:12},
+"140":{name:"中支关税熊猫典藏猫",price:16},
+"141":{name:"中支关税牡丹乌",price:14},
+"142":{name:"中支关税利群金休闲",price:16},
+"143":{name:"中支关税黄金叶商鼎",price:13},
+"144":{name:"中支关税荷花黑武士",price:16},
+"145":{name:"中支关税七星蓝莓爆",price:17},
+"146":{name:"中支关税茅台十二生肖爆",price:17},
+"147":{name:"细支关税中华金边中",price:13},
+"148":{name:"细支关税中支3克白中",price:16},
+"149":{name:"细支关税黄鹤楼1916平安爆",price:16},
+"150":{name:"细支关税煊赫门粉门",price:10},
+"151":{name:"粗支关税希尔顿红",price:20},
+"152":{name:"粗支温沙",price:12},
+"153":{name:"细支阿里山樱花",price:18},
+"154":{name:"细支阿里山洛神花",price:18},
+"155":{name:"细支阿里山香芋冰激凌爆",price:18},
+"156":{name:"细支阿里山茉莉花爆",price:16},
+"157":{name:"细支阿里山桂花爆",price:15},
+"158":{name:"细支阿里山芒果爆",price:17},
+"159":{name:"细支阿里山西瓜爆",price:17},
+"160":{name:"细支阿里山玫瑰花爆",price:15},
+"161":{name:"细支阿里山薰衣草爆",price:15},
+"162":{name:"中支阿里山蓝莓爆",price:18},
+"163":{name:"中支阿里山青柠可乐爆",price:18},
+"164":{name:"中支阿里山香芋柠檬爆",price:18},
+"165":{name:"中支阿里山哈密瓜爆",price:17},
+"166":{name:"中支阿里山冰桃双爆",price:16}
+
+};
+
+// ====================== 价格表2（你只改这里的price！） ======================
+const goodsData2 = {
+"01":{name:"百乐红酒",price:15},
+"02":{name:"百乐酸奶",price:15},
+"03":{name:"百乐葡萄",price:15},
+"04":{name:"百乐哈密瓜",price:15},
+"05":{name:"百乐柠檬",price:19},
+"06":{name:"百乐凤梨",price:15},
+"07":{name:"百乐苹果",price:15},
+"08":{name:"百乐橙子",price:15},
+"09":{name:"百乐西瓜",price:15},
+"10":{name:"百乐蔓越莓双爆",price:18},
+"11":{name:"百乐蜂蜜柚子",price:15},
+"12":{name:"百乐姜茶",price:15},
+"13":{name:"百乐红茶",price:15},
+"14":{name:"爱喜果冻",price:15},
+"15":{name:"爱喜口香糖",price:15},
+"16":{name:"爱喜棒棒糖",price:15},
+"17":{name:"爱喜喜马拉雅",price:15},
+"18":{name:"爱喜芒果单",price:15},
+"19":{name:"爱喜朱古力",price:18},
+"20":{name:"爱喜香芋",price:21},
+"21":{name:"爱喜葡萄双爆",price:15},
+"22":{name:"爱喜苹果双爆",price:15},
+"23":{name:"爱喜青柠双爆",price:15},
+"24":{name:"爱喜橙子双爆",price:15},
+"25":{name:"爱喜芒果双爆",price:15},
+"26":{name:"爱喜草莓爆",price:15},
+"27":{name:"爱喜冰淇淋爆",price:15},
+"28":{name:"爱喜镜面幻夜蓝莓",price:15},
+"29":{name:"爱喜冰咖啡爆",price:15},
+"30":{name:"爱喜冰川爆",price:15},
+"31":{name:"爱喜白葡萄酒",price:15},
+"32":{name:"宝恒树叶",price:19},
+"33":{name:"宝恒荔枝薄荷",price:19},
+"34":{name:"宝恒雪茄",price:19},
+"35":{name:"宝恒茅台",price:19},
+"36":{name:"好利时细支黑猫陈皮爆",price:12},
+"37":{name:"好利时中支苹果",price:13},
+"38":{name:"好利时蓝莓双爆",price:13},
+"39":{name:"阿凡达香蕉",price:14},
+"40":{name:"阿凡达哈密瓜",price:14},
+"41":{name:"阿米go水果混合",price:14},
+"42":{name:"阿米go咖啡",price:16},
+"43":{name:"阿米go香芋",price:16},
+"44":{name:"阿米go青柠",price:16},
+"45":{name:"铁塔猫红酒",price:17},
+"46":{name:"铁塔猫酸奶",price:17},
+"47":{name:"铁塔猫冰橙",price:17},
+"48":{name:"铁塔猫冰果",price:17},
+"49":{name:"铁塔猫海盐",price:12},
+"50":{name:"555蓝",price:18},
+"51":{name:"铁塔猫橙子咖啡双爆",price:22},
+"52":{name:"细铁塔猫烟花葡萄",price:17},
+"53":{name:"细铁塔猫烟花芒果",price:17},
+"54":{name:"铁塔猫蜂蜜双爆",price:18},
+"55":{name:"铁塔猫酸奶双爆",price:18},
+"56":{name:"铁塔猫鲜奶油",price:17},
+"57":{name:"铁塔猫水蜜桃",price:17},
+"58":{name:"铁塔猫绿茶",price:17},
+"59":{name:"铁塔猫咖啡",price:17},
+"60":{name:"铁塔猫五味象之谜",price:19},
+"61":{name:"铁塔猫日月爆",price:19},
+"62":{name:"黑杰克柠檬",price:12},
+"63":{name:"黑杰克凤梨",price:12},
+"64":{name:"黑杰克青柠",price:12},
+"65":{name:"蓝星甜嘴",price:17},
+"66":{name:"蓝星香芋",price:17},
+"67":{name:"蓝星冰激凌",price:17},
+"68":{name:"蓝星三味爆",price:18},
+"69":{name:"万宝路白万",price:20},
+"70":{name:"万宝路红万",price:20},
+"71":{name:"船长黄",price:14},
+"72":{name:"日版船长藏红花",price:16},
+"73":{name:"日版船长青苹果",price:16},
+"74":{name:"日版船长天堂茶",price:16},
+"75":{name:"老船长五星樱桃",price:15},
+"76":{name:"老船长五星香草",price:15},
+"77":{name:"DJ草莓",price:12},
+"78":{name:"DJ陈皮",price:12},
+"79":{name:"贵族黑超长",price:17},
+"80":{name:"贵族白超长",price:17},
+"81":{name:"法老粗",price:15},
+"82":{name:"查普曼咖啡",price:19},
+"83":{name:"查普曼樱桃",price:19},
+"84":{name:"查普曼葡萄",price:19},
+"85":{name:"迪宝路5mg蓝莓爆",price:13},
+"86":{name:"优雅双苹果",price:13},
+"87":{name:"优雅原味",price:12},
+"88":{name:"人缘香蕉",price:16},
+"89":{name:"侧推香蕉",price:17},
+"90":{name:"星空椰子",price:18},
+"91":{name:"星空菠萝",price:22},
+"92":{name:"小丑",price:17},
+"93":{name:"黑细云斯顿",price:19},
+"94":{name:"国王彩虹芒果",price:13},
+"95":{name:"国王彩虹樱桃",price:13},
+"97":{name:"民主党加长咖啡",price:16},
+"98":{name:"民主党加长樱桃",price:16},
+"99":{name:"紧身衣草莓",price:14},
+"100":{name:"紧身衣巧克力",price:14},
+"101":{name:"卡比龙～黑色总裁",price:50},
+"102":{name:"卡比龙～白色总裁",price:50},
+"103":{name:"卡比龙～灰色总裁",price:50},
+"104":{name:"卡比龙～绿色总裁",price:52},
+"105":{name:"卡比龙～金色总裁",price:55},
+"106":{name:"卡比龙～黑金总裁",price:75},
+"107":{name:"卡比龙黑色～中长支",price:28},
+"108":{name:"卡比龙白色～中长支",price:23},
+"109":{name:"卡比龙绿色～中长支",price:28},
+"110":{name:"卡比龙香草～中长支",price:30},
+"111":{name:"卡比龙樱桃～中长支",price:30},
+"112":{name:"卡比龙巧克力中长支",price:30},
+"113":{name:"卡比龙巧克力粗支",price:25},
+"114":{name:"卡比龙香草～粗支",price:25},
+"115":{name:"卡比龙樱桃～粗支",price:25},
+"116":{name:"大华黄金眼",price:17},
+"117":{name:"阿拉伯蓝骆驼",price:19},
+"118":{name:"钻石粉",price:19},
+"119":{name:"钻石黑",price:19},
+"120":{name:"蓝星西柚",price:17},
+"121":{name:"蓝星芒果",price:17},
+"122":{name:"骆驼俄版",price:24},
+"123":{name:"铁盒猫头鹰",price:22},
+"124":{name:"梦都柠檬",price:12},
+"125":{name:"梦都葡萄",price:12},
+"126":{name:"梦都樱桃",price:12},
+"127":{name:"黑魔鬼2000",price:17},
+"128":{name:"铁盒法老",price:22},
+"129":{name:"cat粉猫",price:12},
+"130":{name:"大卫杜夫红",price:15},
+"131":{name:"大卫杜夫白",price:15},
+"132":{name:"大卫杜夫蓝",price:15},
+"133":{name:"莫丽恩橙子爆",price:15},
+"134":{name:"寂寞啪啪啪",price:14},
+"135":{name:"米兰6味爆",price:15},
+"136":{name:"米兰彩虹双爆",price:12},
+"137":{name:"米兰蓝莓双爆",price:12},
+"138":{name:"百乐椰子",price:15},
+"139":{name:"深鼓～深蓝",price:70},
+"140":{name:"浅鼓～浅蓝",price:70},
+"141":{name:"马坝～葡萄",price:50},
+"142":{name:"马坝～咖啡",price:50},
+"143":{name:"马坝～冰茶",price:50},
+"144":{name:"马坝～苹果",price:50},
+"145":{name:"马坝～原味",price:50},
+"146":{name:"马坝三星～黑梅",price:50},
+"147":{name:"马坝三星～巧克",price:50},
+"148":{name:"马坝～优妮塔斯甜李子",price:50},
+"149":{name:"马坝～优秀异国日出",price:50},
+"150":{name:"马坝～皇家水果",price:50},
+"151":{name:"丰收～樱桃",price:50},
+"152":{name:"丰收～咖啡",price:50},
+"153":{name:"帆船～黄",price:50},
+"154":{name:"帆船～绿",price:50},
+"155":{name:"百乐榴莲",price:18},
+"156":{name:"卡比龙简装黑粗",price:20},
+"157":{name:"卡比龙简装黑细",price:20},
+"158":{name:"卡比龙简装蓝",price:22},
+"159":{name:"欧版草莓万宝路",price:19},
+"160":{name:"欧版黑冰单爆万",price:19},
+"161":{name:"法拉利柠檬",price:13},
+"162":{name:"法拉利巧克",price:13},
+"163":{name:"卡比龙简装白粗",price:18},
+"164":{name:"卡比龙简装白细",price:18},
+"165":{name:"复古波斯香草",price:14},
+"166":{name:"复古波斯咖啡",price:14},
+"167":{name:"复古波斯樱桃",price:14},
+"168":{name:"多乐蓝锦鲤",price:12},
+"169":{name:"多乐侧推绿",price:12},
+"170":{name:"欧盟无嘴骆驼",price:30},
+"171":{name:"天马葡萄",price:12},
+"172":{name:"天马樱桃",price:12},
+"173":{name:"天马木糖醇",price:12},
+"174":{name:"天马白苹果",price:12},
+"175":{name:"天马薄荷",price:12},
+"176":{name:"天马草莓",price:12},
+"177":{name:"阿里山茉莉",price:19},
+"178":{name:"阿里山桂花",price:19},
+"179":{name:"阿里山金山",price:14},
+"180":{name:"阿里山红山",price:14},
+"181":{name:"口红BOSS水蜜桃双爆",price:17},
+"182":{name:"口红BOSS哈密瓜双爆",price:17},
+"183":{name:"卡比龙黑金",price:75},
+"184":{name:"阿里山蓝莓",price:19},
+"185":{name:"Boss蓝莓双爆",price:14},
+"186":{name:"Boss菠萝双爆",price:14},
+"187":{name:"Boss红酒双爆",price:14},
+"188":{name:"Boss芒果双爆",price:14},
+"189":{name:"Boss水蜜桃双爆",price:14},
+"190":{name:"Boss哈密瓜双爆",price:14},
+"191":{name:"Boss西瓜双爆",price:14},
+"192":{name:"Boss橙子双爆",price:14},
+"193":{name:"阿里山七里香",price:19},
+"194":{name:"阿里山彼岸花",price:19},
+"195":{name:"阿里山玫瑰花",price:19},
+"196":{name:"阿里山薰衣草",price:19}
+};
+
+let currentPriceData = goodsData1;
+let currentPriceTab = 1;
+let finalOrderText = "";
+
+function switchPrice(num){
+    document.getElementById("tab1").classList.remove("active");
+    document.getElementById("tab2").classList.remove("active");
+    document.getElementById("tab"+num).classList.add("active");
+    currentPriceData = num === 1 ? goodsData1 : goodsData2;
+    currentPriceTab = num;
+
+    document.getElementById("numInput").value = "";
+    document.getElementById("goodsNameText").value = "";
+    document.getElementById("showResult").innerText = "";
+    document.getElementById("searchResult").style.display = "none";
+    finalOrderText = "";
+    
+    loadPricesFromFirebase();
+}
+
+function getPrice(){
+    let inputVal = document.getElementById("numInput").value.trim();
+    let discount = parseFloat(document.getElementById("discountInput").value) || 0;
+    let resDom = document.getElementById("showResult");
+    let nameText = document.getElementById("goodsNameText");
+
+    if(!inputVal){
+        resDom.innerText = "请输入商品序号！";
+        nameText.value = "";
+        return;
+    }
+
+    if(inputVal === "0000"){
+        showAllGoods();
+        return;
+    }
+
+    inputVal = inputVal.replace(/，/g, ",").replace(/\s+/g, ",").replace(/,+/g, ",");
+    let items = inputVal.split(",");
+
+    let priceExprArr = [];
+    let nameShowArr = [];
+    let numShowArr = [];
+    let totalCount = 0;
+    let allTotal = 0;
+    let errTip = "";
+
+    items.forEach(item=>{
+        item = item.trim();
+        if(!item) return;
+        let times = 1;
+        let n;
+        if(item.includes("x") || item.includes("*")){
+            let parts = item.split(/[x*]/);
+            n = parts[0].trim();
+            times = parseInt(parts[1])||1;
+        }else{
+            n = item;
+        }
+        let key = n.padStart(2,'0');
+        if(currentPriceData[key]){
+            let ori = currentPriceData[key].price;
+            let singleSale = Math.max(ori - discount, 0);
+            let stockStatus = currentPriceData[key].stock === false ? "【无】" : "";
+            allTotal += singleSale * times;
+            priceExprArr.push(times===1 ? singleSale+"" : singleSale+"×"+times);
+            nameShowArr.push(`${currentPriceData[key].name}${stockStatus} x${times}`);
+            numShowArr.push(times>1 ? `${n}x${times}` : n);
+            totalCount += times;
+        }else{
+            errTip += `序号${n}：无此商品\n`;
+        }
+    });
+
+    let saleStr = priceExprArr.join("+")+"="+allTotal;
+    let shippingFee = currentPriceTab === 1 ? 12 : 15;
+    let totalWithShipping = allTotal + shippingFee;
+    
+    nameText.value = nameShowArr.join("\n");
+
+    finalOrderText = `${numShowArr.join("，")}\n共${totalCount}包\n${saleStr}+邮费${shippingFee}=${totalWithShipping}`;
+    resDom.innerText = errTip + finalOrderText;
+}
+
+function showAllGoods(){
+    let resDom = document.getElementById("showResult");
+    let nameText = document.getElementById("goodsNameText");
+    let discount = parseFloat(document.getElementById("discountInput").value) || 0;
+    let title = currentPriceTab === 1 ? "【价格表1】" : "【价格表2】";
+    let allGoods = [];
+    let nameList = [];
+    
+    let keys = Object.keys(currentPriceData).sort((a, b) => parseInt(a) - parseInt(b));
+    
+    keys.forEach(key => {
+        let item = currentPriceData[key];
+        if(item.name && item.name.trim()){
+            let salePrice = item.price - discount;
+            let stockStatus = item.stock === false ? " 【无】" : "";
+            allGoods.push(`${key} ${item.name}${stockStatus} - ￥${salePrice}`);
+            nameList.push(`${key} ${item.name}${stockStatus}`);
+        }
+    });
+    
+    nameText.value = nameList.join("\n");
+    let discountTip = "";
+    if(discount > 0){
+        discountTip = `（单件优惠￥${discount}）`;
+    }else if(discount < 0){
+        discountTip = `（单件加价￥${Math.abs(discount)}）`;
+    }
+    finalOrderText = title + discountTip + "\n\n" + allGoods.join("\n");
+    resDom.innerText = finalOrderText;
+}
+
+function copyOrder(){
+    if(!finalOrderText){alert("请先核算");return;}
+    navigator.clipboard.writeText(finalOrderText).then(()=>{
+        alert("复制成功");
+    }).catch(()=>{
+        alert("复制失败，请手动复制");
+    });
+}
+
+function searchGoods(){
+    let keywords = document.getElementById("searchInput").value.trim().toLowerCase().split(/\s+/).filter(k => k);
+    let resultDom = document.getElementById("searchResult");
+    if(!keywords.length){
+        resultDom.style.display = "none";
+        return;
+    }
+    let results = [];
+    let foundSet = new Set();
+    
+    let priceClass = isAdmin ? "edit-price" : "edit-price disabled";
+    let tip = isAdmin ? "（点击价格可修改，点击库存切换有/无）" : "";
+    
+    for(let keyword of keywords){
+        for(let key in currentPriceData){
+            let item = currentPriceData[key];
+            if(item.name && item.name.toLowerCase().includes(keyword)){
+                let stockStatus = item.stock === false ? " <span style='color:#e74c3c;font-weight:bold;'>【无】</span>" : "";
+                let stockBtn = isAdmin ? `<span class="stock-btn" onclick="toggleStock('${key}')">${item.stock === false ? "无" : "有"}</span>` : "";
+                let resultHtml = `<div>【${key}】${item.name}${stockStatus} - ￥<span class="${priceClass}" onclick="${isAdmin ? `editPrice('${key}', ${item.price})` : 'alert(\"请先管理员登录\")'}">${item.price}</span> ${stockBtn}</div>`;
+                if(!foundSet.has(key)){
+                    foundSet.add(key);
+                    results.push(resultHtml);
+                }
+            }
+        }
+    }
+    if(results.length > 0){
+        resultDom.innerHTML = "搜索结果" + tip + "（关键字：" + keywords.join("、") + "）：<br>" + results.join("");
+    } else {
+        resultDom.innerText = "未找到包含「" + keywords.join("」或「") + "」的商品";
+    }
+    resultDom.style.display = "block";
+}
+
+// ====================== Firebase 价格管理 ======================
+function editPrice(key, currentPrice){
+    if(!isAdmin){
+        alert("请先点击「管理员登录」并输入密码！");
+        return;
+    }
+    let newPrice = prompt(`修改【${key}】${currentPriceData[key].name}的价格：`, currentPrice);
+    if(newPrice !== null && newPrice !== ""){
+        newPrice = parseInt(newPrice);
+        if(newPrice >= 0){
+            currentPriceData[key].price = newPrice;
+            savePriceToFirebase(key, newPrice);
+            searchGoods();
+        }
+    }
+}
+
+function toggleStock(key){
+    if(!isAdmin){
+        alert("请先点击「管理员登录」并输入密码！");
+        return;
+    }
+    let currentStock = currentPriceData[key].stock;
+    let newStock = currentStock === false ? true : false;
+    currentPriceData[key].stock = newStock;
+    saveStockToFirebase(key, newStock);
+    searchGoods();
+}
+
+async function saveStockToFirebase(key, stock){
+    let syncStatus = document.getElementById("syncStatus");
+    syncStatus.innerText = "正在保存库存...";
+    syncStatus.className = "sync-status syncing";
+    
+    try {
+        let collectionName = currentPriceTab === 1 ? "prices1" : "prices2";
+        await db.collection(collectionName).doc(key).set({
+            stock: stock,
+            updateTime: firebase.firestore.FieldValue.serverTimestamp()
+        }, {merge: true});
+        syncStatus.innerText = "已同步到云端 ✓";
+        syncStatus.className = "sync-status synced";
+    } catch(e) {
+        syncStatus.innerText = "保存失败";
+        console.error("保存库存失败:", e);
+    }
+}
+
+async function savePriceToFirebase(key, price){
+    let syncStatus = document.getElementById("syncStatus");
+    syncStatus.innerText = "正在保存...";
+    syncStatus.className = "sync-status syncing";
+    
+    try {
+        let collectionName = currentPriceTab === 1 ? "prices1" : "prices2";
+        await db.collection(collectionName).doc(key).set({
+            price: price,
+            updateTime: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        syncStatus.innerText = "已同步到云端 ✓";
+        syncStatus.className = "sync-status synced";
+    } catch(e) {
+        syncStatus.innerText = "同步失败，请检查网络";
+        syncStatus.className = "sync-status";
+        console.error("保存失败:", e);
+    }
+}
+
+async function loadPricesFromFirebase(){
+    let syncStatus = document.getElementById("syncStatus");
+    syncStatus.innerText = "正在加载云端价格...";
+    syncStatus.className = "sync-status syncing";
+    
+    try {
+        let collectionName = currentPriceTab === 1 ? "prices1" : "prices2";
+        let snapshot = await db.collection(collectionName).get();
+        
+        snapshot.forEach(doc => {
+            let key = doc.id;
+            let data = doc.data();
+            if(currentPriceData[key]){
+                if(data.price !== undefined){
+                    currentPriceData[key].price = data.price;
+                }
+                if(data.stock !== undefined){
+                    currentPriceData[key].stock = data.stock;
+                }
+            }
+        });
+        
+        syncStatus.innerText = "已同步到云端 ✓";
+        syncStatus.className = "sync-status synced";
+    } catch(e) {
+        syncStatus.innerText = "使用本地价格（网络异常）";
+        syncStatus.className = "sync-status";
+        console.error("加载失败:", e);
+    }
+}
+
+async function resetPrices(){
+    if(!confirm("确定要恢复所有商品为默认价格吗？此操作会清除云端数据！")){
+        return;
+    }
+    
+    let syncStatus = document.getElementById("syncStatus");
+    syncStatus.innerText = "正在恢复默认价格...";
+    syncStatus.className = "sync-status syncing";
+    
+    try {
+        let collectionName = currentPriceTab === 1 ? "prices1" : "prices2";
+        let snapshot = await db.collection(collectionName).get();
+        
+        if(snapshot.empty){
+            // 如果云端没有数据，直接恢复本地
+            let defaultData = currentPriceTab === 1 ? goodsData1 : goodsData2;
+            for(let key in currentPriceData){
+                if(defaultData[key]){
+                    currentPriceData[key].price = defaultData[key].price;
+                }
+            }
+        } else {
+            // 删除云端所有数据
+            let batch = db.batch();
+            snapshot.docs.forEach(doc => {
+                batch.delete(doc.ref);
+            });
+            await batch.commit();
+            
+            // 恢复本地默认价格
+            let defaultData = currentPriceTab === 1 ? goodsData1 : goodsData2;
+            for(let key in currentPriceData){
+                if(defaultData[key]){
+                    currentPriceData[key].price = defaultData[key].price;
+                }
+            }
+        }
+        
+        syncStatus.innerText = "已恢复默认价格 ✓";
+        syncStatus.className = "sync-status synced";
+        
+        document.getElementById("searchResult").style.display = "none";
+        alert("已恢复默认价格！");
+    } catch(e) {
+        syncStatus.innerText = "恢复失败，请检查网络";
+        syncStatus.className = "sync-status";
+        console.error("恢复失败:", e);
+        alert("恢复失败，请检查网络连接或Firestore规则设置");
+    }
+}
+
+// 页面加载时从Firebase同步价格
+window.onload = function(){
+    loadPricesFromFirebase();
+};
+</script>
+</body>
+</html>
